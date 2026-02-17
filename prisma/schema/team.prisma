@@ -8,4 +8,5 @@ model Team {
   seasons      Season[]
   homeMatches  Match[]  @relation("MatchTeam1")
   awayMatches  Match[]  @relation("MatchTeam2")
+  wonMatches   Match[]  @relation("MatchWinner")
 }

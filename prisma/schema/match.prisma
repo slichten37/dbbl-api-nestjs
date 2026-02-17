@@ -13,5 +13,13 @@ model Match {
   seasonId String
   season   Season @relation(fields: [seasonId], references: [id])
 
+  winningTeamId String?
+  winningTeam   Team?   @relation("MatchWinner", fields: [winningTeamId], references: [id])
+
+  team1Score    Int?
+  team2Score    Int?
+  team1Strikes  Int?
+  team2Strikes  Int?
+
   frames Frame[]
 }

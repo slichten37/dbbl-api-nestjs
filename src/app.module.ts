@@ -5,6 +5,7 @@ import { AppService } from "./app.service";
 import { BowlersModule } from "./bowlers";
 import { MatchesModule } from "./matches";
 import { PrismaModule } from "./prisma";
+import { ScorecardAnalysisModule } from "./scorecard-analysis";
 import { SeasonsModule } from "./seasons";
 import { TeamsModule } from "./teams";
 
@@ -18,6 +19,7 @@ import { TeamsModule } from "./teams";
     SeasonsModule,
     TeamsModule,
     MatchesModule,
+    ScorecardAnalysisModule,
   ],
   controllers: [AppController],
   providers: [AppService],
