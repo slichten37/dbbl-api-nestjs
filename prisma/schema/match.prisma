@@ -1,0 +1,17 @@
+model Match {
+  id           String   @id @default(uuid())
+  week         Int
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  team1Id  String
+  team1    Team   @relation("MatchTeam1", fields: [team1Id], references: [id])
+
+  team2Id  String
+  team2    Team   @relation("MatchTeam2", fields: [team2Id], references: [id])
+
+  seasonId String
+  season   Season @relation(fields: [seasonId], references: [id])
+
+  frames Frame[]
+}

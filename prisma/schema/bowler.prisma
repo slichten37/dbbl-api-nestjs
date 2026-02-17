@@ -1,0 +1,9 @@
+model Bowler {
+  id           String   @id @default(uuid())
+  name         String
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  teams  Team[]
+  frames Frame[]
+}

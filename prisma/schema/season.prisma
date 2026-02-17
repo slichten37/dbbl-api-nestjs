@@ -1,0 +1,10 @@
+model Season {
+  id           String   @id @default(uuid())
+  name         String
+  isActive     Boolean  @default(false)
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  teams   Team[]
+  matches Match[]
+}

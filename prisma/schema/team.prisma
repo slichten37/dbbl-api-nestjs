@@ -1,0 +1,11 @@
+model Team {
+  id           String   @id @default(uuid())
+  name         String
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  bowlers      Bowler[]
+  seasons      Season[]
+  homeMatches  Match[]  @relation("MatchTeam1")
+  awayMatches  Match[]  @relation("MatchTeam2")
+}

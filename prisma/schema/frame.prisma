@@ -1,0 +1,18 @@
+model Frame {
+  id           String   @id @default(uuid())
+  frameNumber  Int
+  ball1Score   Int
+  ball2Score   Int?
+  ball3Score   Int?
+  isBall1Split Boolean  @default(false)
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  matchId  String
+  match    Match  @relation(fields: [matchId], references: [id])
+
+  bowlerId String
+  bowler   Bowler @relation(fields: [bowlerId], references: [id])
+
+  @@unique([matchId, bowlerId, frameNumber])
+}
