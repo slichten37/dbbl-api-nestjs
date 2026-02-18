@@ -36,4 +36,14 @@ export class SeasonsController {
   generateSchedule(@Param("id") id: string) {
     return this.seasonsService.generateSchedule(id);
   }
+
+  @Get(":id/stats")
+  getStats(@Param("id") id: string) {
+    return this.seasonsService.getStats(id);
+  }
+
+  @Post(":id/auto-fill-week")
+  autoFillWeek(@Param("id") id: string, @Body() body: { week: number }) {
+    return this.seasonsService.autoFillWeek(id, body.week);
+  }
 }
