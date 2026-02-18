@@ -15,8 +15,8 @@ const seasonIncludes = {
   },
   matches: {
     include: {
-      team1: true,
-      team2: true,
+      homeTeam: true,
+      awayTeam: true,
     },
   },
 };
@@ -56,7 +56,6 @@ export class SeasonsService {
   create(dto: CreateSeasonDto) {
     const { teamIds, isActive, ...rest } = dto;
     return this.prisma.season.create({
-
       data: {
         ...rest,
         isActive: isActive ?? false,
@@ -107,8 +106,8 @@ export class SeasonsService {
     await this.prisma.match.createMany({
       data: matches.map((m) => ({
         seasonId: id,
-        team1Id: m.team1Id,
-        team2Id: m.team2Id,
+        homeTeamId: m.homeTeamId,
+        awayTeamId: m.awayTeamId,
         week: m.week,
       })),
     });
@@ -118,7 +117,7 @@ export class SeasonsService {
 
   private buildRoundRobin(
     teamIds: string[],
-  ): { team1Id: string; team2Id: string; week: number }[] {
+  ): { homeTeamId: string; awayTeamId: string; week: number }[] {
     const teams = [...teamIds];
     const hasBye = teams.length % 2 !== 0;
     if (hasBye) {
@@ -128,7 +127,8 @@ export class SeasonsService {
     const n = teams.length;
     const rounds = n - 1;
     const half = n / 2;
-    const matches: { team1Id: string; team2Id: string; week: number }[] = [];
+    const matches: { homeTeamId: string; awayTeamId: string; week: number }[] =
+      [];
 
     // Standard round-robin: fix teams[0], rotate the rest
     const rotating = teams.slice(1);
@@ -141,7 +141,7 @@ export class SeasonsService {
         const home = current[i];
         const away = current[n - 1 - i];
         if (home !== "BYE" && away !== "BYE") {
-          matches.push({ team1Id: home, team2Id: away, week });
+          matches.push({ homeTeamId: home, awayTeamId: away, week });
         }
       }
 

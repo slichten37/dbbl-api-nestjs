@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -14,6 +15,7 @@ import { MatchesService } from "./matches.service";
 import { CreateMatchDto } from "./dto/create-match.dto";
 import { UpdateMatchDto } from "./dto/update-match.dto";
 import { SubmitScoresDto } from "./dto/submit-scores.dto";
+import { CreateSubstitutionDto } from "./dto/create-substitution.dto";
 
 @Controller("matches")
 export class MatchesController {
@@ -49,12 +51,7 @@ export class MatchesController {
       throw new BadRequestException("No file uploaded");
     }
 
-    const allowedTypes = [
-      "image/jpeg",
-      "image/png",
-      "image/webp",
-      "image/gif",
-    ];
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
     if (!allowedTypes.includes(file.mimetype)) {
       throw new BadRequestException(
         `Invalid file type: ${file.mimetype}. Allowed: ${allowedTypes.join(", ")}`,
@@ -67,5 +64,18 @@ export class MatchesController {
   @Post(":id/submit-scores")
   submitScores(@Param("id") id: string, @Body() dto: SubmitScoresDto) {
     return this.matchesService.submitScores(id, dto);
+  }
+
+  @Post(":id/substitutions")
+  createSubstitution(
+    @Param("id") id: string,
+    @Body() dto: CreateSubstitutionDto,
+  ) {
+    return this.matchesService.createSubstitution(id, dto);
+  }
+
+  @Delete(":id/substitutions/:subId")
+  deleteSubstitution(@Param("id") id: string, @Param("subId") subId: string) {
+    return this.matchesService.deleteSubstitution(id, subId);
   }
 }

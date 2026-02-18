@@ -6,4 +6,7 @@ model Bowler {
 
   teams  Team[]
   frames Frame[]
+
+  originalSubstitutions   MatchSubstitution[] @relation("SubOriginal")
+  substituteSubstitutions MatchSubstitution[] @relation("SubSubstitute")
 }

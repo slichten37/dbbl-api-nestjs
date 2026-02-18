@@ -2,10 +2,10 @@ import { IsInt, IsUUID } from "class-validator";
 
 export class CreateMatchDto {
   @IsUUID()
-  team1Id: string;
+  homeTeamId: string;
 
   @IsUUID()
-  team2Id: string;
+  awayTeamId: string;
 
   @IsUUID()
   seasonId: string;

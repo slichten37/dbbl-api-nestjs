@@ -8,11 +8,11 @@ model Frame {
   createdAtUtc DateTime @default(now())
   updatedAtUtc DateTime @updatedAt
 
-  matchId  String
-  match    Match  @relation(fields: [matchId], references: [id])
+  gameId String
+  game   Game   @relation(fields: [gameId], references: [id])
 
   bowlerId String
   bowler   Bowler @relation(fields: [bowlerId], references: [id])
 
-  @@unique([matchId, bowlerId, frameNumber])
+  @@unique([gameId, bowlerId, frameNumber])
 }

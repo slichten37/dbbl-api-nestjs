@@ -48,6 +48,11 @@ export class BowlerScoresDto {
 }
 
 export class SubmitScoresDto {
+  @IsInt()
+  @Min(1)
+  @Max(3)
+  gameNumber: number;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => BowlerScoresDto)

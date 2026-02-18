@@ -1,31 +1,50 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from "@nestjs/common";
 import { PrismaService } from "../prisma";
 import { ScorecardAnalysisService } from "../scorecard-analysis";
 import { CreateMatchDto } from "./dto/create-match.dto";
 import { UpdateMatchDto } from "./dto/update-match.dto";
 import { SubmitScoresDto } from "./dto/submit-scores.dto";
+import { CreateSubstitutionDto } from "./dto/create-substitution.dto";
 import type { ScorecardAnalysisInput } from "../scorecard-analysis";
 
 const matchIncludes = {
-  team1: {
+  homeTeam: {
     include: {
       bowlers: true,
     },
   },
-  team2: {
+  awayTeam: {
     include: {
       bowlers: true,
     },
   },
   season: true,
-  frames: {
+  games: {
     include: {
-      bowler: true,
+      frames: {
+        include: {
+          bowler: true,
+        },
+        orderBy: [
+          { bowlerId: "asc" as const },
+          { frameNumber: "asc" as const },
+        ],
+      },
     },
-    orderBy: [
-      { bowlerId: "asc" as const },
-      { frameNumber: "asc" as const },
-    ],
+    orderBy: {
+      gameNumber: "asc" as const,
+    },
+  },
+  substitutions: {
+    include: {
+      originalBowler: true,
+      substituteBowler: true,
+      team: true,
+    },
   },
 };
 
@@ -72,9 +91,28 @@ export class MatchesService {
   async analyzeScorecard(id: string, file: Express.Multer.File) {
     const match = await this.findOne(id);
 
+    // Build a map of originalBowlerId -> substituteBowler for active subs
+    const subMap = new Map<string, { id: string; name: string }>();
+    for (const sub of match.substitutions) {
+      subMap.set(sub.originalBowlerId, {
+        id: sub.substituteBowler.id,
+        name: sub.substituteBowler.name,
+      });
+    }
+
     const expectedBowlers = [
-      ...match.team1.bowlers.map((b) => ({ id: b.id, name: b.name })),
-      ...match.team2.bowlers.map((b) => ({ id: b.id, name: b.name })),
+      ...match.homeTeam.bowlers.map((b) => {
+        const replacement = subMap.get(b.id);
+        return replacement
+          ? { id: replacement.id, name: replacement.name }
+          : { id: b.id, name: b.name };
+      }),
+      ...match.awayTeam.bowlers.map((b) => {
+        const replacement = subMap.get(b.id);
+        return replacement
+          ? { id: replacement.id, name: replacement.name }
+          : { id: b.id, name: b.name };
+      }),
     ];
 
     const input: ScorecardAnalysisInput = {
@@ -89,25 +127,46 @@ export class MatchesService {
   async submitScores(id: string, dto: SubmitScoresDto) {
     const match = await this.findOne(id);
 
-    const team1BowlerIds = new Set(
-      match.team1.bowlers.map((b) => b.id),
-    );
-    const team2BowlerIds = new Set(
-      match.team2.bowlers.map((b) => b.id),
-    );
+    const homeTeamBowlerIds = new Set(match.homeTeam.bowlers.map((b) => b.id));
+    const awayTeamBowlerIds = new Set(match.awayTeam.bowlers.map((b) => b.id));
 
+    // Add substitute bowlers to the correct team set
+    for (const sub of match.substitutions) {
+      if (homeTeamBowlerIds.has(sub.originalBowlerId)) {
+        homeTeamBowlerIds.add(sub.substituteBowlerId);
+      } else if (awayTeamBowlerIds.has(sub.originalBowlerId)) {
+        awayTeamBowlerIds.add(sub.substituteBowlerId);
+      }
+    }
+
+    // Find or create the Game record for this gameNumber
+    const game = await this.prisma.game.upsert({
+      where: {
+        matchId_gameNumber: {
+          matchId: id,
+          gameNumber: dto.gameNumber,
+        },
+      },
+      create: {
+        matchId: id,
+        gameNumber: dto.gameNumber,
+      },
+      update: {},
+    });
+
+    // Upsert all frames for this game
     const upserts = dto.bowlers.flatMap((bowler) =>
       bowler.frames.map((frame) =>
         this.prisma.frame.upsert({
           where: {
-            matchId_bowlerId_frameNumber: {
-              matchId: id,
+            gameId_bowlerId_frameNumber: {
+              gameId: game.id,
               bowlerId: bowler.bowlerId,
               frameNumber: frame.frameNumber,
             },
           },
           create: {
-            matchId: id,
+            gameId: game.id,
             bowlerId: bowler.bowlerId,
             frameNumber: frame.frameNumber,
             ball1Score: frame.ball1Score,
@@ -127,39 +186,81 @@ export class MatchesService {
 
     await this.prisma.$transaction(upserts);
 
-    // Calculate team scores and strike counts from submitted frames
-    let team1Score = 0;
-    let team2Score = 0;
-    let team1Strikes = 0;
-    let team2Strikes = 0;
+    // Calculate per-game team scores and strike counts
+    let homeTeamScore = 0;
+    let awayTeamScore = 0;
+    let homeTeamStrikes = 0;
+    let awayTeamStrikes = 0;
 
     for (const bowler of dto.bowlers) {
       const bowlerTotal = this.calculateBowlerTotal(bowler.frames);
       const bowlerStrikes = this.countStrikes(bowler.frames);
 
-      if (team1BowlerIds.has(bowler.bowlerId)) {
-        team1Score += bowlerTotal;
-        team1Strikes += bowlerStrikes;
-      } else if (team2BowlerIds.has(bowler.bowlerId)) {
-        team2Score += bowlerTotal;
-        team2Strikes += bowlerStrikes;
+      if (homeTeamBowlerIds.has(bowler.bowlerId)) {
+        homeTeamScore += bowlerTotal;
+        homeTeamStrikes += bowlerStrikes;
+      } else if (awayTeamBowlerIds.has(bowler.bowlerId)) {
+        awayTeamScore += bowlerTotal;
+        awayTeamStrikes += bowlerStrikes;
       }
     }
 
+    // Calculate per-game points:
+    // Winner gets 10 + their strikes, loser gets their strikes, tie gives 5 + strikes each
+    let homeTeamPoints: number;
+    let awayTeamPoints: number;
+
+    if (homeTeamScore > awayTeamScore) {
+      homeTeamPoints = 10 + homeTeamStrikes;
+      awayTeamPoints = awayTeamStrikes;
+    } else if (awayTeamScore > homeTeamScore) {
+      homeTeamPoints = homeTeamStrikes;
+      awayTeamPoints = 10 + awayTeamStrikes;
+    } else {
+      // Tie
+      homeTeamPoints = 5 + homeTeamStrikes;
+      awayTeamPoints = 5 + awayTeamStrikes;
+    }
+
+    // Update the Game record with scores, strikes, and points
+    await this.prisma.game.update({
+      where: { id: game.id },
+      data: {
+        homeTeamScore,
+        awayTeamScore,
+        homeTeamStrikes,
+        awayTeamStrikes,
+        homeTeamPoints,
+        awayTeamPoints,
+      },
+    });
+
+    // Recompute match-level aggregate points across all submitted games
+    const allGames = await this.prisma.game.findMany({
+      where: { matchId: id },
+    });
+
+    const totalHomePoints = allGames.reduce(
+      (sum, g) => sum + (g.homeTeamPoints ?? 0),
+      0,
+    );
+    const totalAwayPoints = allGames.reduce(
+      (sum, g) => sum + (g.awayTeamPoints ?? 0),
+      0,
+    );
+
     const winningTeamId =
-      team1Score > team2Score
-        ? match.team1Id
-        : team2Score > team1Score
-          ? match.team2Id
+      totalHomePoints > totalAwayPoints
+        ? match.homeTeamId
+        : totalAwayPoints > totalHomePoints
+          ? match.awayTeamId
           : null;
 
     await this.prisma.match.update({
       where: { id },
       data: {
-        team1Score,
-        team2Score,
-        team1Strikes,
-        team2Strikes,
+        homeTeamPoints: totalHomePoints,
+        awayTeamPoints: totalAwayPoints,
         winningTeamId,
       },
     });
@@ -167,8 +268,71 @@ export class MatchesService {
     return this.findOne(id);
   }
 
+  async createSubstitution(matchId: string, dto: CreateSubstitutionDto) {
+    const match = await this.findOne(matchId);
+
+    // Validate teamId is one of the match teams
+    if (dto.teamId !== match.homeTeamId && dto.teamId !== match.awayTeamId) {
+      throw new BadRequestException(
+        "Team must be one of the teams in this match",
+      );
+    }
+
+    // Validate originalBowler belongs to the specified team
+    const team =
+      dto.teamId === match.homeTeamId ? match.homeTeam : match.awayTeam;
+    const isOnTeam = team.bowlers.some((b) => b.id === dto.originalBowlerId);
+    if (!isOnTeam) {
+      throw new BadRequestException(
+        "Original bowler must be a member of the specified team",
+      );
+    }
+
+    // Validate substituteBowler is not on either team
+    const allTeamBowlerIds = [
+      ...match.homeTeam.bowlers.map((b) => b.id),
+      ...match.awayTeam.bowlers.map((b) => b.id),
+    ];
+    if (allTeamBowlerIds.includes(dto.substituteBowlerId)) {
+      throw new BadRequestException(
+        "Substitute bowler must not be on either team in this match",
+      );
+    }
+
+    await this.prisma.matchSubstitution.create({
+      data: {
+        matchId,
+        originalBowlerId: dto.originalBowlerId,
+        substituteBowlerId: dto.substituteBowlerId,
+        teamId: dto.teamId,
+      },
+    });
+
+    return this.findOne(matchId);
+  }
+
+  async deleteSubstitution(matchId: string, substitutionId: string) {
+    const sub = await this.prisma.matchSubstitution.findUnique({
+      where: { id: substitutionId },
+    });
+    if (!sub || sub.matchId !== matchId) {
+      throw new NotFoundException("Substitution not found for this match");
+    }
+
+    await this.prisma.matchSubstitution.delete({
+      where: { id: substitutionId },
+    });
+
+    return this.findOne(matchId);
+  }
+
   private calculateBowlerTotal(
-    frames: { frameNumber: number; ball1Score: number; ball2Score: number | null; ball3Score: number | null }[],
+    frames: {
+      frameNumber: number;
+      ball1Score: number;
+      ball2Score: number | null;
+      ball3Score: number | null;
+    }[],
   ): number {
     const sorted = [...frames].sort((a, b) => a.frameNumber - b.frameNumber);
     let total = 0;
@@ -214,7 +378,12 @@ export class MatchesService {
   }
 
   private countStrikes(
-    frames: { ball1Score: number; ball2Score: number | null; ball3Score: number | null; frameNumber: number }[],
+    frames: {
+      ball1Score: number;
+      ball2Score: number | null;
+      ball3Score: number | null;
+      frameNumber: number;
+    }[],
   ): number {
     let count = 0;
     for (const frame of frames) {

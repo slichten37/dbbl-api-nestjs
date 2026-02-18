@@ -6,7 +6,8 @@ model Team {
 
   bowlers      Bowler[]
   seasons      Season[]
-  homeMatches  Match[]  @relation("MatchTeam1")
-  awayMatches  Match[]  @relation("MatchTeam2")
-  wonMatches   Match[]  @relation("MatchWinner")
+  homeMatches  Match[]  @relation("MatchHomeTeam")
+  awayMatches  Match[]  @relation("MatchAwayTeam")
+  wonMatches          Match[]             @relation("MatchWinner")
+  matchSubstitutions   MatchSubstitution[]
 }

@@ -1,0 +1,20 @@
+model MatchSubstitution {
+  id           String   @id @default(uuid())
+  createdAtUtc DateTime @default(now())
+  updatedAtUtc DateTime @updatedAt
+
+  matchId String
+  match   Match  @relation(fields: [matchId], references: [id])
+
+  originalBowlerId String
+  originalBowler   Bowler @relation("SubOriginal", fields: [originalBowlerId], references: [id])
+
+  substituteBowlerId String
+  substituteBowler   Bowler @relation("SubSubstitute", fields: [substituteBowlerId], references: [id])
+
+  teamId String
+  team   Team   @relation(fields: [teamId], references: [id])
+
+  @@unique([matchId, originalBowlerId])
+  @@unique([matchId, substituteBowlerId])
+}
