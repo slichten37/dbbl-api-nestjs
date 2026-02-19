@@ -265,7 +265,10 @@ export class SeasonsService {
             : match.homeTeamId;
         const loseTs = teamStats.get(losingTeamId);
         if (loseTs) loseTs.matchLosses++;
-      } else if (match.games.length > 0 && match.games.every(g => g.homeTeamScore != null)) {
+      } else if (
+        match.games.length > 0 &&
+        match.games.every((g) => g.homeTeamScore != null)
+      ) {
         // No winner but all games submitted → tie
         const homeTs = teamStats.get(match.homeTeamId);
         if (homeTs) homeTs.matchTies++;
