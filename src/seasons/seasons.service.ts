@@ -200,6 +200,7 @@ export class SeasonsService {
       {
         id: string;
         name: string;
+        totalPoints: number;
         matchWins: number;
         matchLosses: number;
         matchTies: number;
@@ -220,6 +221,7 @@ export class SeasonsService {
       teamStats.set(team.id, {
         id: team.id,
         name: team.name,
+        totalPoints: 0,
         matchWins: 0,
         matchLosses: 0,
         matchTies: 0,
@@ -252,6 +254,16 @@ export class SeasonsService {
             bowlerToTeam.get(sub.originalBowlerId)!,
           );
         }
+      }
+
+      // Accumulate match-level points per team
+      if (match.homeTeamPoints != null) {
+        const homeTs = teamStats.get(match.homeTeamId);
+        if (homeTs) homeTs.totalPoints += match.homeTeamPoints;
+      }
+      if (match.awayTeamPoints != null) {
+        const awayTs = teamStats.get(match.awayTeamId);
+        if (awayTs) awayTs.totalPoints += match.awayTeamPoints;
       }
 
       // Count match win/loss/tie
@@ -308,7 +320,18 @@ export class SeasonsService {
         // Track which bowlers participated in this game
         const bowlersInGame = new Set<string>();
 
-        // Process frames
+        // Group frames by bowler for proper score calculation
+        const framesByBowler = new Map<
+          string,
+          {
+            frameNumber: number;
+            ball1Score: number;
+            ball2Score: number | null;
+            ball3Score: number | null;
+          }[]
+        >();
+
+        // Process frames for strike/spare/gutter counting and grouping
         for (const frame of game.frames) {
           bowlersInGame.add(frame.bowlerId);
           // Ensure bowler stat entry exists
@@ -342,6 +365,17 @@ export class SeasonsService {
             });
           }
 
+          // Group frame for score calculation
+          if (!framesByBowler.has(frame.bowlerId)) {
+            framesByBowler.set(frame.bowlerId, []);
+          }
+          framesByBowler.get(frame.bowlerId)!.push({
+            frameNumber: frame.frameNumber,
+            ball1Score: frame.ball1Score,
+            ball2Score: frame.ball2Score,
+            ball3Score: frame.ball3Score,
+          });
+
           const bs = bowlerStats.get(frame.bowlerId)!;
           const teamId = bowlerToTeam.get(frame.bowlerId);
           const ts = teamId ? teamStats.get(teamId) : null;
@@ -349,19 +383,6 @@ export class SeasonsService {
           const b1 = frame.ball1Score;
           const b2 = frame.ball2Score ?? 0;
           const b3 = frame.ball3Score ?? 0;
-
-          // Total pins (raw pin count, not bonus-adjusted)
-          const framePins = b1 + b2 + b3;
-          bs.pins += framePins;
-          if (ts) ts.pins += framePins;
-
-          // Pins against: attribute to the opposing team
-          if (teamId) {
-            const opponentTeamId =
-              teamId === match.homeTeamId ? match.awayTeamId : match.homeTeamId;
-            const opTs = teamStats.get(opponentTeamId);
-            if (opTs) opTs.pinsAgainst += framePins;
-          }
 
           // Strikes
           if (b1 === 10) {
@@ -414,6 +435,24 @@ export class SeasonsService {
           }
         }
 
+        // Calculate proper bowling scores per bowler (with strike/spare bonuses)
+        for (const [bowlerId, frames] of framesByBowler) {
+          const bowlerScore = this.calculateBowlerTotal(frames);
+          const bs = bowlerStats.get(bowlerId)!;
+          bs.pins += bowlerScore;
+
+          const teamId = bowlerToTeam.get(bowlerId);
+          if (teamId) {
+            const ts = teamStats.get(teamId);
+            if (ts) ts.pins += bowlerScore;
+
+            const opponentTeamId =
+              teamId === match.homeTeamId ? match.awayTeamId : match.homeTeamId;
+            const opTs = teamStats.get(opponentTeamId);
+            if (opTs) opTs.pinsAgainst += bowlerScore;
+          }
+        }
+
         // Increment gamesPlayed for each bowler who had frames in this game
         for (const bowlerId of bowlersInGame) {
           const bs = bowlerStats.get(bowlerId);
@@ -443,6 +482,7 @@ export class SeasonsService {
         return {
           id: t.id,
           name: t.name,
+          totalPoints: t.totalPoints,
           matchWins: t.matchWins,
           matchLosses: t.matchLosses,
           matchTies: t.matchTies,
@@ -591,5 +631,53 @@ export class SeasonsService {
     if (r < 0.3) return max; // 30% chance of spare/clearing remaining
     if (r < 0.55) return Math.max(0, max - 1);
     return Math.floor(Math.random() * (max + 1));
+  }
+
+  /** Calculate proper bowling score with strike/spare bonuses */
+  private calculateBowlerTotal(
+    frames: {
+      frameNumber: number;
+      ball1Score: number;
+      ball2Score: number | null;
+      ball3Score: number | null;
+    }[],
+  ): number {
+    const sorted = [...frames].sort((a, b) => a.frameNumber - b.frameNumber);
+    let total = 0;
+
+    for (let i = 0; i < sorted.length; i++) {
+      const frame = sorted[i];
+      const b1 = frame.ball1Score;
+      const b2 = frame.ball2Score ?? 0;
+      const b3 = frame.ball3Score ?? 0;
+
+      if (frame.frameNumber === 10) {
+        total += b1 + b2 + b3;
+      } else {
+        const next = sorted[i + 1];
+        const next2 = sorted[i + 2];
+
+        if (b1 === 10) {
+          total += 10;
+          if (next) {
+            total += next.ball1Score;
+            if (next.ball1Score === 10 && next.frameNumber < 10) {
+              total += next2 ? next2.ball1Score : 0;
+            } else {
+              total += next.ball2Score ?? 0;
+            }
+          }
+        } else if (b1 + b2 === 10) {
+          total += 10;
+          if (next) {
+            total += next.ball1Score;
+          }
+        } else {
+          total += b1 + b2;
+        }
+      }
+    }
+
+    return total;
   }
 }
