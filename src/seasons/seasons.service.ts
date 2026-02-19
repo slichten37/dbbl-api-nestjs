@@ -187,6 +187,7 @@ export class SeasonsService {
       {
         id: string;
         name: string;
+        gamesPlayed: number;
         pins: number;
         strikes: number;
         spares: number;
@@ -200,7 +201,12 @@ export class SeasonsService {
         id: string;
         name: string;
         matchWins: number;
+        matchLosses: number;
+        matchTies: number;
         gameWins: number;
+        gameLosses: number;
+        gameTies: number;
+        gamesPlayed: number;
         pins: number;
         pinsAgainst: number;
         strikes: number;
@@ -215,7 +221,12 @@ export class SeasonsService {
         id: team.id,
         name: team.name,
         matchWins: 0,
+        matchLosses: 0,
+        matchTies: 0,
         gameWins: 0,
+        gameLosses: 0,
+        gameTies: 0,
+        gamesPlayed: 0,
         pins: 0,
         pinsAgainst: 0,
         strikes: 0,
@@ -243,29 +254,60 @@ export class SeasonsService {
         }
       }
 
-      // Count match win
+      // Count match win/loss/tie
       if (match.winningTeamId) {
-        const ts = teamStats.get(match.winningTeamId);
-        if (ts) ts.matchWins++;
+        const winTs = teamStats.get(match.winningTeamId);
+        if (winTs) winTs.matchWins++;
+
+        const losingTeamId =
+          match.winningTeamId === match.homeTeamId
+            ? match.awayTeamId
+            : match.homeTeamId;
+        const loseTs = teamStats.get(losingTeamId);
+        if (loseTs) loseTs.matchLosses++;
+      } else if (match.games.length > 0 && match.games.every(g => g.homeTeamScore != null)) {
+        // No winner but all games submitted → tie
+        const homeTs = teamStats.get(match.homeTeamId);
+        if (homeTs) homeTs.matchTies++;
+        const awayTs = teamStats.get(match.awayTeamId);
+        if (awayTs) awayTs.matchTies++;
       }
 
       for (const game of match.games) {
-        // Count game wins
-        if (
-          game.homeTeamScore != null &&
-          game.awayTeamScore != null &&
-          game.homeTeamScore !== game.awayTeamScore
-        ) {
-          const gameWinnerTeamId =
-            game.homeTeamScore > game.awayTeamScore
-              ? match.homeTeamId
-              : match.awayTeamId;
-          const ts = teamStats.get(gameWinnerTeamId);
-          if (ts) ts.gameWins++;
+        // Count game wins/losses/ties
+        if (game.homeTeamScore != null && game.awayTeamScore != null) {
+          if (game.homeTeamScore > game.awayTeamScore) {
+            const winTs = teamStats.get(match.homeTeamId);
+            if (winTs) winTs.gameWins++;
+            const loseTs = teamStats.get(match.awayTeamId);
+            if (loseTs) loseTs.gameLosses++;
+          } else if (game.awayTeamScore > game.homeTeamScore) {
+            const winTs = teamStats.get(match.awayTeamId);
+            if (winTs) winTs.gameWins++;
+            const loseTs = teamStats.get(match.homeTeamId);
+            if (loseTs) loseTs.gameLosses++;
+          } else {
+            const homeTs = teamStats.get(match.homeTeamId);
+            if (homeTs) homeTs.gameTies++;
+            const awayTs = teamStats.get(match.awayTeamId);
+            if (awayTs) awayTs.gameTies++;
+          }
         }
+
+        // Track gamesPlayed per team (each submitted game counts once per team)
+        if (game.homeTeamScore != null) {
+          const homeTs = teamStats.get(match.homeTeamId);
+          if (homeTs) homeTs.gamesPlayed++;
+          const awayTs = teamStats.get(match.awayTeamId);
+          if (awayTs) awayTs.gamesPlayed++;
+        }
+
+        // Track which bowlers participated in this game
+        const bowlersInGame = new Set<string>();
 
         // Process frames
         for (const frame of game.frames) {
+          bowlersInGame.add(frame.bowlerId);
           // Ensure bowler stat entry exists
           if (!bowlerStats.has(frame.bowlerId)) {
             // We need the bowler name — look it up from team rosters or subs
@@ -289,6 +331,7 @@ export class SeasonsService {
             bowlerStats.set(frame.bowlerId, {
               id: frame.bowlerId,
               name: bowlerName,
+              gamesPlayed: 0,
               pins: 0,
               strikes: 0,
               spares: 0,
@@ -367,12 +410,50 @@ export class SeasonsService {
             if (ts) ts.gutters++;
           }
         }
+
+        // Increment gamesPlayed for each bowler who had frames in this game
+        for (const bowlerId of bowlersInGame) {
+          const bs = bowlerStats.get(bowlerId);
+          if (bs) bs.gamesPlayed++;
+        }
       }
     }
 
+    // Convert raw totals to per-game averages
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
     return {
-      bowlers: Array.from(bowlerStats.values()),
-      teams: Array.from(teamStats.values()),
+      bowlers: Array.from(bowlerStats.values()).map((b) => {
+        const g = b.gamesPlayed || 1;
+        return {
+          id: b.id,
+          name: b.name,
+          gamesPlayed: b.gamesPlayed,
+          ppg: round2(b.pins / g),
+          spg: round2(b.strikes / g),
+          sparespg: round2(b.spares / g),
+          gpg: round2(b.gutters / g),
+        };
+      }),
+      teams: Array.from(teamStats.values()).map((t) => {
+        const g = t.gamesPlayed || 1;
+        return {
+          id: t.id,
+          name: t.name,
+          matchWins: t.matchWins,
+          matchLosses: t.matchLosses,
+          matchTies: t.matchTies,
+          gameWins: t.gameWins,
+          gameLosses: t.gameLosses,
+          gameTies: t.gameTies,
+          gamesPlayed: t.gamesPlayed,
+          ppg: round2(t.pins / g),
+          oppg: round2(t.pinsAgainst / g),
+          spg: round2(t.strikes / g),
+          sparespg: round2(t.spares / g),
+          gpg: round2(t.gutters / g),
+        };
+      }),
     };
   }
 

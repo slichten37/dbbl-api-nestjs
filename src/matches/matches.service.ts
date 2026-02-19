@@ -240,21 +240,34 @@ export class MatchesService {
       where: { matchId: id },
     });
 
-    const totalHomePoints = allGames.reduce(
+    let totalHomePoints = allGames.reduce(
       (sum, g) => sum + (g.homeTeamPoints ?? 0),
       0,
     );
-    const totalAwayPoints = allGames.reduce(
+    let totalAwayPoints = allGames.reduce(
       (sum, g) => sum + (g.awayTeamPoints ?? 0),
       0,
     );
 
-    const winningTeamId =
-      totalHomePoints > totalAwayPoints
-        ? match.homeTeamId
-        : totalAwayPoints > totalHomePoints
-          ? match.awayTeamId
-          : null;
+    // Only determine the match winner and award the 5-point bonus
+    // once all 3 games have been submitted with scores
+    const completedGames = allGames.filter(
+      (g) => g.homeTeamPoints !== null && g.awayTeamPoints !== null,
+    );
+    const allGamesComplete = completedGames.length === 3;
+
+    let winningTeamId: string | null = null;
+
+    if (allGamesComplete) {
+      if (totalHomePoints > totalAwayPoints) {
+        winningTeamId = match.homeTeamId;
+        totalHomePoints += 5;
+      } else if (totalAwayPoints > totalHomePoints) {
+        winningTeamId = match.awayTeamId;
+        totalAwayPoints += 5;
+      }
+      // If tied after all 3 games, no bonus is awarded and winningTeamId stays null
+    }
 
     await this.prisma.match.update({
       where: { id },
@@ -390,7 +403,7 @@ export class MatchesService {
       if (frame.ball1Score === 10) count++;
       // In the 10th frame, ball2 and ball3 can also be strikes
       if (frame.frameNumber === 10) {
-        if (frame.ball2Score === 10) count++;
+        if (frame.ball1Score && frame.ball2Score === 10) count++;
         if (frame.ball3Score === 10) count++;
       }
     }
