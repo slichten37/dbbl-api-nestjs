@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
 import { SeasonsService } from "./seasons.service";
 import { CreateSeasonDto } from "./dto/create-season.dto";
 import { UpdateSeasonDto } from "./dto/update-season.dto";
+import { SwitchWeeksDto } from "./dto/switch-weeks.dto";
 
 @Controller("seasons")
 export class SeasonsController {
@@ -45,5 +46,10 @@ export class SeasonsController {
   @Post(":id/auto-fill-week")
   autoFillWeek(@Param("id") id: string, @Body() body: { week: number }) {
     return this.seasonsService.autoFillWeek(id, body.week);
+  }
+
+  @Post(":id/switch-weeks")
+  switchWeeks(@Param("id") id: string, @Body() dto: SwitchWeeksDto) {
+    return this.seasonsService.switchWeeks(id, dto);
   }
 }

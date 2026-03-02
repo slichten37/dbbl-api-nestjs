@@ -7,6 +7,7 @@ import { PrismaService } from "../prisma";
 import { MatchesService } from "../matches/matches.service";
 import { CreateSeasonDto } from "./dto/create-season.dto";
 import { UpdateSeasonDto } from "./dto/update-season.dto";
+import { SwitchWeeksDto } from "./dto/switch-weeks.dto";
 
 const seasonIncludes = {
   teams: {
@@ -498,6 +499,51 @@ export class SeasonsService {
         };
       }),
     };
+  }
+
+  async switchWeeks(seasonId: string, dto: SwitchWeeksDto) {
+    const { weekA, weekB } = dto;
+
+    if (weekA === weekB) {
+      throw new BadRequestException("weekA and weekB must be different");
+    }
+
+    await this.findOne(seasonId);
+
+    const [matchesA, matchesB] = await Promise.all([
+      this.prisma.match.findMany({
+        where: { seasonId, week: weekA },
+        select: { id: true },
+      }),
+      this.prisma.match.findMany({
+        where: { seasonId, week: weekB },
+        select: { id: true },
+      }),
+    ]);
+
+    if (matchesA.length === 0) {
+      throw new BadRequestException(
+        `No matches found for week ${weekA} in this season`,
+      );
+    }
+    if (matchesB.length === 0) {
+      throw new BadRequestException(
+        `No matches found for week ${weekB} in this season`,
+      );
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.match.updateMany({
+        where: { id: { in: matchesA.map((m) => m.id) } },
+        data: { week: weekB },
+      }),
+      this.prisma.match.updateMany({
+        where: { id: { in: matchesB.map((m) => m.id) } },
+        data: { week: weekA },
+      }),
+    ]);
+
+    return this.findOne(seasonId);
   }
 
   async autoFillWeek(seasonId: string, week: number) {
