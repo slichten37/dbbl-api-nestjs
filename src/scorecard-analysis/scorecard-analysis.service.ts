@@ -581,9 +581,7 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
       } else {
         // Frame 10
         total +=
-          frame.ball1Score +
-          (frame.ball2Score ?? 0) +
-          (frame.ball3Score ?? 0);
+          frame.ball1Score + (frame.ball2Score ?? 0) + (frame.ball3Score ?? 0);
       }
     }
 
