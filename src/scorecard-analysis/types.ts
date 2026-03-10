@@ -70,6 +70,9 @@ export interface BowlerFrameData {
   /** Matched bowler ID from the expected bowlers list */
   matchedBowlerId: string;
 
+  /** Final score visible on the scorecard (null if not visible) */
+  visibleFinalScore: number | null;
+
   /** 10 frames of scoring data */
   frames: FrameData[];
 }
@@ -102,6 +105,7 @@ export interface ClaudeScorecardResponse {
   bowlers: Array<{
     scorecard_name: string;
     matched_bowler_id: string;
+    visible_final_score: number | null;
     frames: Array<{
       frame_number: number;
       ball1_score: number;

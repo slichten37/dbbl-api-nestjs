@@ -200,11 +200,7 @@ The "/" (spare) and "1" (one pin) symbols look VERY similar on handwritten score
 - If interpreting as spare would give a negative ball2_score (ball1 > 10, impossible), it must be "1".
 - This check is definitive — if the math is impossible one way, the other interpretation is correct, period.
 
-**Check 3 — Statistical likelihood:**
-- In recreational bowling, spares are MUCH more common than knocking down exactly 1 pin on ball 2. If visual analysis is inconclusive, lean toward "/" (spare) unless the context clearly suggests "1".
-- A "1" after a high first ball (7, 8, 9) is especially rare — it means the bowler only knocked down 1 of the remaining pins. Spare is far more likely in these cases.
-
-**Check 4 — Running totals cross-check (when available):**
+**Check 3 — Running totals cross-check (when available):**
 - Many scorecards have running cumulative totals written below each frame, BUT SOME DO NOT. Do not assume they are present.
 - IF running totals ARE visible on the scorecard, use them to verify: calculate the cumulative score both ways (as spare and as "1"). The interpretation that matches the written totals is correct.
 - IF running totals are NOT visible, rely on checks 1–3 above.
@@ -249,8 +245,8 @@ Bowling scorecards sometimes have a running cumulative total written below each 
 
 **If running totals are NOT visible on the scorecard:**
 1. Calculate the game total yourself from your extracted scores.
-2. Check if the FINAL TOTAL is written anywhere on the scorecard and compare.
-3. For each mark you interpreted as "1" in the ball 2 position, double-check using visual stroke analysis and statistical likelihood (spares are much more common than 1-pin scores).
+2. Look for a FINAL TOTAL written anywhere on the scorecard for each bowler and report it in visible_final_score.
+3. For each mark you interpreted as "1" in the ball 2 position, double-check using visual stroke analysis.
 4. If any interpretation seems uncertain, note it in your reasoning and set confidence to "MEDIUM".
 
 ## Worked Examples
@@ -303,6 +299,7 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
     {
       "scorecard_name": "name as it appears on scorecard",
       "matched_bowler_id": "uuid-from-expected-bowlers",
+      "visible_final_score": 167,
       "frames": [
         {
           "frame_number": 1,
@@ -343,8 +340,8 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
 - A number "1" through "9" is ALWAYS a literal pin count.
 - **For EVERY ball 2 mark that could be "/" or "1", explicitly state in your reasoning what visual stroke you see (diagonal vs vertical) and which interpretation you chose.**
 - **Check 2 is definitive:** if ball1_score + 1 > 10, the mark CANNOT be "1". If ball1_score + ball2_score would exceed 10, reinterpret as spare.
-- **When in visual doubt, PREFER spare "/" over "1"** — spares are statistically far more common than 1-pin scores on ball 2 in recreational bowling.
 - IF running totals are visible on the scorecard, verify your extracted scores against them. If not visible, rely on stroke analysis and mathematical checks.
+- **ALWAYS look for a visible final score (game total) written on the scorecard for each bowler.** Report it as visible_final_score (or null if not visible). This is used by our post-processing to catch spare-vs-1 misreads.
 - A strike on frames 1-9 always has ball2_score: null and ball3_score: null
 - Frame 10 ball2_score is NEVER null
 - Ignore handicap lines completely
@@ -384,6 +381,7 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
     const bowlers: BowlerFrameData[] = parsed.bowlers.map((b) => ({
       bowlerName: b.scorecard_name,
       matchedBowlerId: b.matched_bowler_id,
+      visibleFinalScore: b.visible_final_score ?? null,
       frames: b.frames.map((f) => ({
         frameNumber: f.frame_number,
         ball1Score: f.ball1_score,
@@ -423,8 +421,9 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
    *
    * Rules applied:
    * 1. Impossible scores: ball1 + ball2 > 10 in frames 1-9 → ball2 must be spare (10 - ball1)
-   * 2. Suspect "1" scores: ball2 === 1 after a high first ball (7-9) is statistically very unlikely
-   *    in recreational bowling — likely a misread spare
+   * 2. Final score matching: if Claude reported a visible final score, calculate the game total
+   *    from extracted frames. If they don't match, try toggling ambiguous "1"s to spares
+   *    (and vice versa) to find a combination that matches the visible score.
    */
   private validateAndCorrectScores(
     result: ScorecardAnalysisResult,
@@ -435,10 +434,9 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
 
     const corrections: FrameCorrection[] = [];
     const correctedBowlers = result.bowlers.map((bowler, bowlerIndex) => {
-      const correctedFrames = bowler.frames.map((frame) => {
-        // Only check frames 1-9 for ball2 spare-vs-1 issues
+      // Phase 1: Fix impossible scores (ball1 + ball2 > 10)
+      let frames = bowler.frames.map((frame) => {
         if (frame.frameNumber <= 9 && frame.ball2Score !== null) {
-          // Rule 1: Impossible score — ball1 + ball2 > 10
           if (frame.ball1Score + frame.ball2Score > 10) {
             const spareValue = 10 - frame.ball1Score;
             corrections.push({
@@ -451,56 +449,55 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
             });
             return { ...frame, ball2Score: spareValue };
           }
-
-          // Rule 2: Suspect "1" after high first ball
-          // If ball1 is 7-9 and ball2 is 1, it's highly likely this is a spare misread as 1
-          if (
-            frame.ball2Score === 1 &&
-            frame.ball1Score >= 7 &&
-            frame.ball1Score <= 9
-          ) {
-            const spareValue = 10 - frame.ball1Score;
-            corrections.push({
-              bowlerIndex,
-              frameNumber: frame.frameNumber,
-              ball: "ball2",
-              originalValue: 1,
-              correctedValue: spareValue,
-              reason: `ball2 read as "1" after ball1=${frame.ball1Score} — statistically very unlikely, corrected to spare (${spareValue})`,
-            });
-            return { ...frame, ball2Score: spareValue };
-          }
         }
 
-        // Frame 10: check ball3 spare-vs-1 as well
+        // Frame 10: ball2+ball3 > 10 after non-strike ball2
         if (frame.frameNumber === 10 && frame.ball3Score !== null) {
-          // If ball1 was a strike, ball2+ball3 relationship matters
           if (
             frame.ball1Score === 10 &&
             frame.ball2Score !== null &&
             frame.ball2Score !== 10 &&
-            frame.ball3Score !== null
+            frame.ball2Score + frame.ball3Score > 10
           ) {
-            // ball2 is not a strike, so ball2+ball3 <= 10
-            if (frame.ball2Score + frame.ball3Score > 10) {
-              const spareValue = 10 - frame.ball2Score;
-              corrections.push({
-                bowlerIndex,
-                frameNumber: 10,
-                ball: "ball3",
-                originalValue: frame.ball3Score,
-                correctedValue: spareValue,
-                reason: `10th frame: ball2(${frame.ball2Score}) + ball3(${frame.ball3Score}) = ${frame.ball2Score + frame.ball3Score} > 10 — impossible after non-strike ball2, corrected to spare (${spareValue})`,
-              });
-              return { ...frame, ball3Score: spareValue };
-            }
+            const spareValue = 10 - frame.ball2Score;
+            corrections.push({
+              bowlerIndex,
+              frameNumber: 10,
+              ball: "ball3",
+              originalValue: frame.ball3Score,
+              correctedValue: spareValue,
+              reason: `10th frame: ball2(${frame.ball2Score}) + ball3(${frame.ball3Score}) = ${frame.ball2Score + frame.ball3Score} > 10 — impossible after non-strike ball2, corrected to spare (${spareValue})`,
+            });
+            return { ...frame, ball3Score: spareValue };
           }
         }
 
         return frame;
       });
 
-      return { ...bowler, frames: correctedFrames };
+      // Phase 2: If visible final score is available, try to match it
+      // by toggling ambiguous ball2 values between "1" and spare
+      if (bowler.visibleFinalScore !== null) {
+        const currentTotal = this.calculateGameTotal(frames);
+        if (currentTotal !== bowler.visibleFinalScore) {
+          this.logger.log(
+            `Bowler "${bowler.bowlerName}": calculated total ${currentTotal} ≠ visible score ${bowler.visibleFinalScore}, attempting corrections`,
+          );
+
+          const correctedResult = this.tryMatchFinalScore(
+            frames,
+            bowler.visibleFinalScore,
+            bowlerIndex,
+          );
+
+          if (correctedResult) {
+            frames = correctedResult.frames;
+            corrections.push(...correctedResult.corrections);
+          }
+        }
+      }
+
+      return { ...bowler, frames };
     });
 
     if (corrections.length === 0) {
@@ -533,6 +530,164 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
         result.reasoning +
         `\n\n[Post-processing corrections: ${correctionSummary}]`,
     };
+  }
+
+  /**
+   * Calculate the final game total from 10 frames using standard bowling scoring.
+   */
+  private calculateGameTotal(
+    frames: Array<{
+      frameNumber: number;
+      ball1Score: number;
+      ball2Score: number | null;
+      ball3Score: number | null;
+    }>,
+  ): number {
+    const sorted = [...frames].sort((a, b) => a.frameNumber - b.frameNumber);
+    let total = 0;
+
+    for (let i = 0; i < 10; i++) {
+      const frame = sorted[i];
+      if (!frame) continue;
+
+      if (i < 9) {
+        const isStrike = frame.ball1Score === 10;
+        const isSpare =
+          !isStrike &&
+          frame.ball2Score !== null &&
+          frame.ball1Score + frame.ball2Score === 10;
+
+        if (isStrike) {
+          const next = sorted[i + 1];
+          if (!next) {
+            total += 10;
+            continue;
+          }
+          const firstBonus = next.ball1Score;
+          let secondBonus: number;
+          if (next.ball1Score === 10 && i < 8) {
+            const next2 = sorted[i + 2];
+            secondBonus = next2 ? next2.ball1Score : 0;
+          } else {
+            secondBonus = next.ball2Score ?? 0;
+          }
+          total += 10 + firstBonus + secondBonus;
+        } else if (isSpare) {
+          const next = sorted[i + 1];
+          total += 10 + (next ? next.ball1Score : 0);
+        } else {
+          total += frame.ball1Score + (frame.ball2Score ?? 0);
+        }
+      } else {
+        // Frame 10
+        total +=
+          frame.ball1Score +
+          (frame.ball2Score ?? 0) +
+          (frame.ball3Score ?? 0);
+      }
+    }
+
+    return total;
+  }
+
+  /**
+   * Try toggling ambiguous ball2 values (1 ↔ spare) across frames to find
+   * a combination that makes the calculated total match the visible final score.
+   *
+   * Only considers frames where ball2 is 1 (could be spare) or where ball2
+   * equals (10 - ball1) which is a spare (could be 1).
+   */
+  private tryMatchFinalScore(
+    frames: Array<{
+      frameNumber: number;
+      ball1Score: number;
+      ball2Score: number | null;
+      ball3Score: number | null;
+      isBall1Split: boolean;
+    }>,
+    targetScore: number,
+    bowlerIndex: number,
+  ): { frames: typeof frames; corrections: FrameCorrection[] } | null {
+    // Find ambiguous frames: ball2 is 1 (might be spare) or ball2 = 10-ball1 (spare, might be 1)
+    const ambiguousIndices: number[] = [];
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      if (f.frameNumber > 9) continue; // Skip 10th frame for simplicity
+      if (f.ball2Score === null) continue; // Strike
+
+      // ball2 is 1 → could be a spare instead
+      if (f.ball2Score === 1) {
+        ambiguousIndices.push(i);
+        continue;
+      }
+      // ball2 = 10 - ball1 (it's a spare) and ball1 is not 9
+      // (if ball1 is 9, spare value is 1, which is the same as "1" — no ambiguity)
+      // Check if flipping to "1" is valid (ball1 + 1 <= 10)
+      if (
+        f.ball1Score + f.ball2Score === 10 &&
+        f.ball1Score !== 9 &&
+        f.ball1Score + 1 <= 10
+      ) {
+        ambiguousIndices.push(i);
+      }
+    }
+
+    if (ambiguousIndices.length === 0) return null;
+
+    // Try all combinations of toggling ambiguous frames (2^N, limited to avoid explosion)
+    const maxCombinations = Math.min(
+      Math.pow(2, ambiguousIndices.length),
+      1024,
+    );
+
+    for (let mask = 1; mask < maxCombinations; mask++) {
+      const testFrames = frames.map((f) => ({ ...f }));
+      const testCorrections: FrameCorrection[] = [];
+
+      for (let bit = 0; bit < ambiguousIndices.length; bit++) {
+        if (!(mask & (1 << bit))) continue;
+        const idx = ambiguousIndices[bit];
+        const f = testFrames[idx];
+
+        if (f.ball2Score === 1) {
+          // Toggle 1 → spare
+          const spareValue = 10 - f.ball1Score;
+          testCorrections.push({
+            bowlerIndex,
+            frameNumber: f.frameNumber,
+            ball: "ball2",
+            originalValue: 1,
+            correctedValue: spareValue,
+            reason: `ball2 changed from 1 to spare (${spareValue}) to match visible final score of ${targetScore}`,
+          });
+          testFrames[idx] = { ...f, ball2Score: spareValue };
+        } else {
+          // Toggle spare → 1
+          testCorrections.push({
+            bowlerIndex,
+            frameNumber: f.frameNumber,
+            ball: "ball2",
+            originalValue: f.ball2Score!,
+            correctedValue: 1,
+            reason: `ball2 changed from spare (${f.ball2Score}) to 1 to match visible final score of ${targetScore}`,
+          });
+          testFrames[idx] = { ...f, ball2Score: 1 };
+        }
+      }
+
+      const testTotal = this.calculateGameTotal(testFrames);
+      if (testTotal === targetScore) {
+        this.logger.log(
+          `Found matching combination: ${testCorrections.length} toggle(s) produce total ${testTotal}`,
+        );
+        return { frames: testFrames, corrections: testCorrections };
+      }
+    }
+
+    this.logger.warn(
+      `Could not find any combination of spare/1 toggles to match visible score ${targetScore}`,
+    );
+    return null;
   }
 
   private mapConfidence(confidence: string): AnalysisConfidence {
