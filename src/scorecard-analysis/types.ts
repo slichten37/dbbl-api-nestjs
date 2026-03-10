@@ -48,6 +48,21 @@ export interface FrameData {
   isBall1Split: boolean;
 }
 
+export interface FrameCorrection {
+  /** Bowler index in the bowlers array */
+  bowlerIndex: number;
+  /** Frame number (1-10) */
+  frameNumber: number;
+  /** Which ball was corrected */
+  ball: "ball2" | "ball3";
+  /** Original value from Claude */
+  originalValue: number;
+  /** Corrected value */
+  correctedValue: number;
+  /** Reason for the correction */
+  reason: string;
+}
+
 export interface BowlerFrameData {
   /** Bowler name as read from the scorecard */
   bowlerName: string;
@@ -66,6 +81,8 @@ export interface ScorecardAnalysisResult {
   reasoning: string;
   processingTimeMs: number;
   errorMessage?: string;
+  /** Frames that were auto-corrected by post-processing validation */
+  corrections?: FrameCorrection[];
 }
 
 // ============================================================================

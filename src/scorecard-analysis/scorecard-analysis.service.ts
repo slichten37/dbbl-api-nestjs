@@ -1,12 +1,14 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Anthropic from "@anthropic-ai/sdk";
+import sharp from "sharp";
 import {
   ScorecardAnalysisInput,
   ScorecardAnalysisResult,
   ClaudeScorecardResponse,
   AnalysisConfidence,
   BowlerFrameData,
+  FrameCorrection,
 } from "./types";
 
 @Injectable()
@@ -32,10 +34,16 @@ export class ScorecardAnalysisService {
     try {
       this.logger.log("Starting scorecard analysis");
 
+      // Preprocess image for better OCR accuracy
+      const preprocessedBase64 = await this.preprocessImage(
+        input.imageBase64,
+        input.mediaType,
+      );
+
       const prompt = this.buildPrompt(input);
 
       const response = await this.anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-opus-4-20250514",
         max_tokens: 4096,
         messages: [
           {
@@ -45,8 +53,8 @@ export class ScorecardAnalysisService {
                 type: "image",
                 source: {
                   type: "base64",
-                  media_type: input.mediaType,
-                  data: input.imageBase64,
+                  media_type: "image/jpeg",
+                  data: preprocessedBase64,
                 },
               },
               {
@@ -70,11 +78,14 @@ export class ScorecardAnalysisService {
       const parsed = this.parseResponse(textContent.text);
       const result = this.transformToResult(parsed, processingTimeMs);
 
+      // Post-processing: validate and correct likely spare-vs-1 misreads
+      const correctedResult = this.validateAndCorrectScores(result);
+
       this.logger.log(
-        `Scorecard analysis completed in ${processingTimeMs}ms - confidence: ${result.confidence}`,
+        `Scorecard analysis completed in ${processingTimeMs}ms - confidence: ${correctedResult.confidence}${correctedResult.corrections?.length ? `, ${correctedResult.corrections.length} corrections applied` : ""}`,
       );
 
-      return result;
+      return correctedResult;
     } catch (error) {
       const processingTimeMs = Date.now() - startTime;
       const errorMessage =
@@ -83,6 +94,57 @@ export class ScorecardAnalysisService {
       this.logger.error(`Scorecard analysis failed: ${errorMessage}`, error);
 
       return this.createUnreadableResult(processingTimeMs, errorMessage);
+    }
+  }
+
+  /**
+   * Preprocess the scorecard image for better OCR accuracy:
+   * - Convert to grayscale (removes color noise)
+   * - Normalize contrast (linear stretch)
+   * - Apply unsharp mask for crisper text edges
+   * - Downscale if larger than ~4MP to reduce noise
+   * - Re-encode as high-quality JPEG
+   */
+  private async preprocessImage(
+    base64Data: string,
+    _mediaType: string,
+  ): Promise<string> {
+    try {
+      const inputBuffer = Buffer.from(base64Data, "base64");
+      const metadata = await sharp(inputBuffer).metadata();
+
+      let pipeline = sharp(inputBuffer)
+        .grayscale()
+        .normalize() // linear contrast stretch
+        .sharpen({ sigma: 1.5, m1: 1.0, m2: 0.5 }); // unsharp mask
+
+      // Downscale if image exceeds ~4MP to reduce noise without losing detail
+      const pixels = (metadata.width ?? 0) * (metadata.height ?? 0);
+      if (pixels > 4_000_000) {
+        const scale = Math.sqrt(4_000_000 / pixels);
+        const newWidth = Math.round((metadata.width ?? 0) * scale);
+        pipeline = pipeline.resize(newWidth, null, {
+          fit: "inside",
+          withoutEnlargement: true,
+        });
+        this.logger.log(
+          `Image downscaled from ${metadata.width}x${metadata.height} to width=${newWidth}`,
+        );
+      }
+
+      const outputBuffer = await pipeline.jpeg({ quality: 90 }).toBuffer();
+      const outputBase64 = outputBuffer.toString("base64");
+
+      this.logger.log(
+        `Image preprocessed: ${(inputBuffer.length / 1024).toFixed(0)}KB → ${(outputBuffer.length / 1024).toFixed(0)}KB`,
+      );
+
+      return outputBase64;
+    } catch (error) {
+      this.logger.warn(
+        `Image preprocessing failed, using original: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+      return base64Data;
     }
   }
 
@@ -125,12 +187,28 @@ Bowling scorecards use specific symbols. You MUST understand these before extrac
 - **"X" is ALWAYS a strike (10 pins on first ball).**
 
 ### CRITICAL — Distinguishing "/" from "1"
-The "/" (spare) and "1" (one pin) symbols look VERY similar on handwritten scorecards. When you see a mark that could be "/" or "1" in the ball 2 position, you MUST use the **running totals and/or final score** written on the scorecard to determine which it is:
+The "/" (spare) and "1" (one pin) symbols look VERY similar on handwritten scorecards. For EVERY mark in a ball 2 (or ball 3) position that could be "/" or "1", you MUST apply ALL of the following checks in order:
 
-- **If interpreting it as "/" (spare) makes the running totals match** what's written on the scorecard → it IS a spare "/".
-- **If interpreting it as "1" makes the running totals match** what's written on the scorecard → it IS a "1".
-- A spare (/) gives a bonus: the frame score = 10 + next ball. A "1" gives no bonus: the frame score = ball1 + 1. This leads to VERY different running totals, so the cumulative scores on the scorecard will clearly tell you which reading is correct.
-- **When in doubt, always check the math against the running totals on the scorecard.** The running totals are your source of truth for disambiguating "/" vs "1".
+**Check 1 — Visual stroke analysis (PRIMARY METHOD):**
+- **"/" (spare)** is a DIAGONAL line slanting from bottom-left to top-right (like a forward slash). It is usually drawn quickly with a single stroke.
+- **"1" (one pin)** is a VERTICAL line, sometimes with a small serif or flag at the top. It goes straight up and down.
+- Examine the angle of the stroke carefully. If it leans diagonally, it's "/". If it's vertical, it's "1".
+- In your reasoning, you MUST explicitly state for each ambiguous mark: "Frame N ball 2: stroke is [diagonal/vertical], interpreting as [spare/1]"
+
+**Check 2 — Mathematical impossibility check:**
+- If ball1_score + 1 > 10, it CANNOT be "1" — it MUST be "/" (spare). For example, if ball 1 is 10, a "1" for ball 2 would make 11 total, which is impossible.
+- If interpreting as spare would give a negative ball2_score (ball1 > 10, impossible), it must be "1".
+- This check is definitive — if the math is impossible one way, the other interpretation is correct, period.
+
+**Check 3 — Statistical likelihood:**
+- In recreational bowling, spares are MUCH more common than knocking down exactly 1 pin on ball 2. If visual analysis is inconclusive, lean toward "/" (spare) unless the context clearly suggests "1".
+- A "1" after a high first ball (7, 8, 9) is especially rare — it means the bowler only knocked down 1 of the remaining pins. Spare is far more likely in these cases.
+
+**Check 4 — Running totals cross-check (when available):**
+- Many scorecards have running cumulative totals written below each frame, BUT SOME DO NOT. Do not assume they are present.
+- IF running totals ARE visible on the scorecard, use them to verify: calculate the cumulative score both ways (as spare and as "1"). The interpretation that matches the written totals is correct.
+- IF running totals are NOT visible, rely on checks 1–3 above.
+- A spare adds a bonus (10 + next ball) while "1" does not, so the totals will diverge significantly — easy to distinguish when totals are present.
 
 ## Your Analysis Process
 
@@ -159,15 +237,21 @@ For EACH bowler and EACH frame, first identify what symbols are written on the s
 **IGNORE any handicap rows** — only extract actual bowling scores.
 **Always return numeric pin counts as integers, never symbols like "X" or "/".**
 
-### Step 4 — Cross-Check Against Running Totals (MANDATORY)
-Bowling scorecards typically have a running cumulative total written below each frame. After you extract all ball scores for a bowler, you MUST:
+### Step 4 — Cross-Check Against Running Totals (IF AVAILABLE)
+Bowling scorecards sometimes have a running cumulative total written below each frame, but many scorecards DO NOT have these totals. After you extract all ball scores for a bowler:
+
+**If running totals ARE visible on the scorecard:**
 1. Calculate the cumulative score yourself using standard bowling scoring rules (strikes get +next 2 balls, spares get +next 1 ball).
 2. Compare YOUR calculated running totals against the running totals WRITTEN on the scorecard photo.
 3. If they don't match, go back and re-examine the frames where the totals diverge. The most common error is reading "/" as "1" or vice versa — re-check those frames first.
 4. Adjust your extracted scores until your calculated totals match what's on the scorecard.
 5. If you still can't make the totals match after re-examining, reduce confidence to "MEDIUM" or "LOW" and explain the discrepancy in your reasoning.
 
-This step is ESPECIALLY important for disambiguating "/" vs "1" — a spare adds a bonus (10 + next ball) while a "1" does not, which causes dramatically different running totals. The totals on the scorecard are your ground truth.
+**If running totals are NOT visible on the scorecard:**
+1. Calculate the game total yourself from your extracted scores.
+2. Check if the FINAL TOTAL is written anywhere on the scorecard and compare.
+3. For each mark you interpreted as "1" in the ball 2 position, double-check using visual stroke analysis and statistical likelihood (spares are much more common than 1-pin scores).
+4. If any interpretation seems uncertain, note it in your reasoning and set confidence to "MEDIUM".
 
 ## Worked Examples
 
@@ -257,12 +341,14 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
 - "/" ALWAYS means spare: ball2_score = 10 minus ball1_score. NEVER record "/" as a literal value.
 - "-" ALWAYS means 0 pins. NEVER skip it or treat it as missing.
 - A number "1" through "9" is ALWAYS a literal pin count.
-- **When a ball 2 mark is ambiguous between "/" and "1", USE THE RUNNING TOTALS on the scorecard to decide.** A spare gives a large bonus; a "1" does not. Calculate both interpretations and see which matches the cumulative totals written on the card.
+- **For EVERY ball 2 mark that could be "/" or "1", explicitly state in your reasoning what visual stroke you see (diagonal vs vertical) and which interpretation you chose.**
+- **Check 2 is definitive:** if ball1_score + 1 > 10, the mark CANNOT be "1". If ball1_score + ball2_score would exceed 10, reinterpret as spare.
+- **When in visual doubt, PREFER spare "/" over "1"** — spares are statistically far more common than 1-pin scores on ball 2 in recreational bowling.
+- IF running totals are visible on the scorecard, verify your extracted scores against them. If not visible, rely on stroke analysis and mathematical checks.
 - A strike on frames 1-9 always has ball2_score: null and ball3_score: null
 - Frame 10 ball2_score is NEVER null
 - Ignore handicap lines completely
-- Match each bowler to exactly one expected bowler ID — no duplicates
-- YOUR FINAL CALCULATED TOTALS MUST MATCH THE TOTALS ON THE SCORECARD. If they don't, re-examine your readings.`;
+- Match each bowler to exactly one expected bowler ID — no duplicates`;
   }
 
   private parseResponse(rawResponse: string): ClaudeScorecardResponse {
@@ -329,6 +415,123 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
       reasoning: `Analysis failed: ${errorMessage}`,
       processingTimeMs,
       errorMessage,
+    };
+  }
+
+  /**
+   * Post-processing validation: detect and correct likely spare-vs-1 misreads.
+   *
+   * Rules applied:
+   * 1. Impossible scores: ball1 + ball2 > 10 in frames 1-9 → ball2 must be spare (10 - ball1)
+   * 2. Suspect "1" scores: ball2 === 1 after a high first ball (7-9) is statistically very unlikely
+   *    in recreational bowling — likely a misread spare
+   */
+  private validateAndCorrectScores(
+    result: ScorecardAnalysisResult,
+  ): ScorecardAnalysisResult {
+    if (!result.success || result.bowlers.length === 0) {
+      return result;
+    }
+
+    const corrections: FrameCorrection[] = [];
+    const correctedBowlers = result.bowlers.map((bowler, bowlerIndex) => {
+      const correctedFrames = bowler.frames.map((frame) => {
+        // Only check frames 1-9 for ball2 spare-vs-1 issues
+        if (frame.frameNumber <= 9 && frame.ball2Score !== null) {
+          // Rule 1: Impossible score — ball1 + ball2 > 10
+          if (frame.ball1Score + frame.ball2Score > 10) {
+            const spareValue = 10 - frame.ball1Score;
+            corrections.push({
+              bowlerIndex,
+              frameNumber: frame.frameNumber,
+              ball: "ball2",
+              originalValue: frame.ball2Score,
+              correctedValue: spareValue,
+              reason: `ball1(${frame.ball1Score}) + ball2(${frame.ball2Score}) = ${frame.ball1Score + frame.ball2Score} > 10 — impossible, corrected to spare (${spareValue})`,
+            });
+            return { ...frame, ball2Score: spareValue };
+          }
+
+          // Rule 2: Suspect "1" after high first ball
+          // If ball1 is 7-9 and ball2 is 1, it's highly likely this is a spare misread as 1
+          if (
+            frame.ball2Score === 1 &&
+            frame.ball1Score >= 7 &&
+            frame.ball1Score <= 9
+          ) {
+            const spareValue = 10 - frame.ball1Score;
+            corrections.push({
+              bowlerIndex,
+              frameNumber: frame.frameNumber,
+              ball: "ball2",
+              originalValue: 1,
+              correctedValue: spareValue,
+              reason: `ball2 read as "1" after ball1=${frame.ball1Score} — statistically very unlikely, corrected to spare (${spareValue})`,
+            });
+            return { ...frame, ball2Score: spareValue };
+          }
+        }
+
+        // Frame 10: check ball3 spare-vs-1 as well
+        if (frame.frameNumber === 10 && frame.ball3Score !== null) {
+          // If ball1 was a strike, ball2+ball3 relationship matters
+          if (
+            frame.ball1Score === 10 &&
+            frame.ball2Score !== null &&
+            frame.ball2Score !== 10 &&
+            frame.ball3Score !== null
+          ) {
+            // ball2 is not a strike, so ball2+ball3 <= 10
+            if (frame.ball2Score + frame.ball3Score > 10) {
+              const spareValue = 10 - frame.ball2Score;
+              corrections.push({
+                bowlerIndex,
+                frameNumber: 10,
+                ball: "ball3",
+                originalValue: frame.ball3Score,
+                correctedValue: spareValue,
+                reason: `10th frame: ball2(${frame.ball2Score}) + ball3(${frame.ball3Score}) = ${frame.ball2Score + frame.ball3Score} > 10 — impossible after non-strike ball2, corrected to spare (${spareValue})`,
+              });
+              return { ...frame, ball3Score: spareValue };
+            }
+          }
+        }
+
+        return frame;
+      });
+
+      return { ...bowler, frames: correctedFrames };
+    });
+
+    if (corrections.length === 0) {
+      return result;
+    }
+
+    // Downgrade confidence if corrections were made
+    let confidence = result.confidence;
+    if (confidence === AnalysisConfidence.HIGH) {
+      confidence = AnalysisConfidence.MEDIUM;
+    }
+
+    const correctionSummary = corrections
+      .map(
+        (c) =>
+          `Bowler ${c.bowlerIndex + 1}, Frame ${c.frameNumber}: ${c.reason}`,
+      )
+      .join("; ");
+
+    this.logger.log(
+      `Post-processing applied ${corrections.length} correction(s): ${correctionSummary}`,
+    );
+
+    return {
+      ...result,
+      bowlers: correctedBowlers,
+      confidence,
+      corrections,
+      reasoning:
+        result.reasoning +
+        `\n\n[Post-processing corrections: ${correctionSummary}]`,
     };
   }
 
